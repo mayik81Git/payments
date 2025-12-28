@@ -29,8 +29,10 @@ public class MongoPaymentRepositoryAdapter implements PaymentRepository {
     @CircuitBreaker(name = "mongodbAdapter")
     @Retry(name = "mongodbAdapter")          // <--- ESTO activa los 3 reintentos
     public void save(Payment payment) {
-        log.info(">>> Intentando persistir en MongoDB...");
-        throw new RuntimeException("ERROR SIMULADO DE RED");
+        // 1. Convertimos el objeto de Dominio (Payment) al Documento de MongoDB
+        PaymentDocument doc = mapper.toDocument(payment);
+        // 2. Guardamos usando el repositorio de Spring Data
+        mongoRepo.save(doc);
     }
 
     @Override
