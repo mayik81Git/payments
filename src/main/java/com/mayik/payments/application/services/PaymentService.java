@@ -1,51 +1,53 @@
 package com.mayik.payments.application.services;
 
-import com.mayik.payments.domain.exceptions.DomainException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mayik.payments.domain.model.Payment;
-import com.mayik.payments.domain.ports.in.ProcessPaymentUseCase;
-import com.mayik.payments.domain.ports.out.PaymentEventPublisher;
 import com.mayik.payments.domain.ports.out.PaymentRepository;
-import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
-import io.github.resilience4j.retry.annotation.Retry;
+import com.mayik.payments.infrastructure.input.messaging.dto.PaymentEventDTO;
+import com.mayik.payments.infrastructure.output.persistence.entity.OutboxEvent;
+import com.mayik.payments.infrastructure.output.persistence.repository.OutboxRepository;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
+import java.time.LocalDateTime;
 import java.util.UUID;
 
-@Slf4j
-@RequiredArgsConstructor
 @Service
-public class PaymentService implements ProcessPaymentUseCase {
+@RequiredArgsConstructor
+public class PaymentService {
 
     private final PaymentRepository paymentRepository;
-    private final PaymentEventPublisher eventPublisher;
+    private final OutboxRepository outboxRepository;
+    private final ObjectMapper objectMapper;
 
-    @Override
-    @Transactional // Asegura consistencia atómica
-    @CircuitBreaker(name = "paymentsService", fallbackMethod = "fallback")
     public void process(UUID paymentId) {
-        log.info("Iniciando procesamiento del pago: {}", paymentId);
-
-        // 1. Recuperar el Agregado del puerto de salida
         Payment payment = paymentRepository.findById(paymentId)
-                .orElseThrow(() -> new DomainException("Pago no encontrado: " + paymentId));
+                .orElseThrow(() -> new RuntimeException("Pago no encontrado"));
 
-        // 2. Ejecutar lógica de negocio (El Agregado valida sus reglas)
         payment.complete();
-
-        // 3. Persistir los cambios (Resiliencia aplicada en el adaptador)
         paymentRepository.save(payment);
 
-        // 4. Notificar al resto del sistema vía Kafka
-        eventPublisher.publish(payment);
+        try {
+            // Creamos el DTO antes de serializarlo
+            PaymentEventDTO eventDTO = new PaymentEventDTO(
+                    payment.getId().toString(),
+                    payment.getMoney().getAmount(),
+                    payment.getMoney().getCurrency(),
+                    "PAYMENT_CREATED", // <-- Aquí ya no será nulo
+                    LocalDateTime.now()
+            );
 
-        log.info("Pago {} procesado y evento publicado exitosamente", paymentId);
-    }
+            OutboxEvent event = OutboxEvent.builder()
+                    .aggregateId(payment.getId().toString())
+                    .type(eventDTO.type())
+                    .payload(objectMapper.writeValueAsString(eventDTO)) // Serializamos el DTO, no el Payment
+                    .createdAt(LocalDateTime.now())
+                    .processed(false)
+                    .build();
 
-    // El fallback debe tener la misma firma + la excepción
-    public void fallback(UUID id, Exception e) {
-        System.out.println("### FALLBACK EJECUTADO por error: " + e.getMessage());
+            outboxRepository.save(event);
+        } catch (Exception e) {
+            throw new RuntimeException("Error al serializar el DTO para el Outbox", e);
+        }
     }
 }
